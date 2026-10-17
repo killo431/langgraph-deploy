@@ -1,4 +1,3 @@
-# Based on `langgraph dockerfile --api-version 0.16.1`.
 FROM langchain/langgraph-api:0.16.1-py3.12-wolfi@sha256:7d03f0e4135a87725037fb9a47f0d056c56a6dae354679b09c3ce98c017daed6
 
 WORKDIR /deps/bmad-agent
@@ -12,7 +11,7 @@ RUN uv export --frozen --no-dev --no-emit-project --no-hashes --output-file /tmp
 
 ENV LANGGRAPH_HTTP='{"disable_meta": false}'
 ENV LANGGRAPH_CHECKPOINTER='{"ttl": {"strategy": "delete", "sweep_interval_minutes": 60, "default_ttl": 43200}}'
-ENV LANGSERVE_GRAPHS='{"bmad_agent": "/deps/bmad-agent/graphs/agent.py:graph"}'
+ENV LANGSERVE_GRAPHS='{"bmad_agent": "/deps/bmad-agent/graphs/agent.py:graph", "bmad_project": "/deps/bmad-agent/graphs/bmad_workflow.py:graph"}'
 
 # Preserve the server package after installing user dependencies (CLI convention).
 RUN mkdir -p /api/langgraph_api /api/langgraph_runtime /api/langgraph_license && \
