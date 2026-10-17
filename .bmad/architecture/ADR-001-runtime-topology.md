@@ -20,6 +20,12 @@ approval, streaming, reproducible releases, and a clearly separated data plane.
 - Use `langgraph.types.interrupt` and `Command(resume=...)` for approvals.
   Agent Server supplies the production checkpointer; only tests use an in-memory
   saver. Nodes preceding an interrupt must be replay-safe.
+- Register the separate `bmad_project` graph for model-backed IT project planning.
+  It emits structured requirements, architecture, backlog, implementation, and
+  QA artifacts; architecture requires an explicit human approval and has a bounded
+  revision loop. It does not execute generated plans or perform external side
+  effects. Project content is sent to the configured model provider and may enter
+  LangSmith traces, so data handling must be reviewed before use.
 - Keep PostgreSQL and Redis private on the Compose network. Bind the API to
   loopback by default; require an authenticated TLS gateway before remote access.
 - Build and smoke-test before publishing lowercase GHCR image names, immutable

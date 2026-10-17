@@ -51,7 +51,9 @@ def run(client, thread_id, content):
 
 def test_agent_server_health_and_registration(client):
     assistants = post(client, "/assistants/search", {"limit": 100})
-    assert "bmad_agent" in [assistant["graph_id"] for assistant in assistants]
+    graph_ids = [assistant["graph_id"] for assistant in assistants]
+    assert "bmad_agent" in graph_ids
+    assert "bmad_project" in graph_ids
 
 
 def test_multi_turn_persistence_and_isolation(client):
