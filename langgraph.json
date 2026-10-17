@@ -4,7 +4,8 @@
   "dependencies": ["."],
   "image_distro": "wolfi",
   "graphs": {
-    "bmad_agent": "./graphs/agent.py:graph"
+    "bmad_agent": "./graphs/agent.py:graph",
+    "bmad_project": "./graphs/bmad_workflow.py:graph"
   },
   "env": ".env",
   "checkpointer": {

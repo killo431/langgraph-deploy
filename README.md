@@ -106,6 +106,46 @@ reviewer-only approval route; never let an untrusted caller approve its own work
 Only then change `API_BIND_ADDRESS` if needed. Replace the deterministic executor
 with authorized domain tools and extend tests before real side effects.
 
+### BMAD IT project planning workflow
+
+The separately registered `bmad_project` graph turns an IT project brief into
+structured requirements, a proposed architecture, an ordered story backlog, an
+implementation plan, and a quality/release plan. It pauses for a human to approve
+the architecture before producing downstream artifacts. The proposal can go
+through at most three review rounds; an unapproved proposal then ends the run.
+
+Create a thread as above and submit a project brief:
+
+```bash
+curl --fail "http://127.0.0.1:8123/threads/${THREAD_ID}/runs/wait" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "assistant_id":"bmad_project",
+    "input":{
+      "project_name":"Service desk modernization",
+      "project_description":"Replace the legacy IT ticket intake application.",
+      "goals":["Improve ticket visibility"],
+      "constraints":["Keep the existing identity provider"]
+    }
+  }'
+```
+
+Inspect the pending architecture in the thread state. A trusted reviewer resumes
+the same thread with `{"approved":true}` to continue or
+`{"approved":false,"feedback":"..."}`
+to request a revision. Only a boolean `true` approves. Set `OPENAI_API_KEY` to
+invoke this graph; `BMAD_MODEL` optionally overrides its default `gpt-4o-mini`
+model. The project brief and generated artifacts are sent to the configured model
+provider and may be included in LangSmith traces, so assess data handling and
+retention before submitting confidential project information.
+
+This workflow produces planning artifacts only: it does not write code, run
+commands, change infrastructure, or assert that planned tests passed. The existing
+`bmad_agent` remains the deterministic approval/execution-protocol example.
+Neither graph adds API authentication; do not expose the API or allow untrusted
+callers to approve their own work. Put remote access behind an authenticated TLS
+gateway and enforce reviewer identity/authorization before production use.
+
 ## Development and verification
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
@@ -134,7 +174,8 @@ checks and deletes it. Run both passes on a disposable test deployment. Ordinary
 `uv run --frozen pytest` skips deployment tests unless explicitly enabled.
 `AGENT_SERVER_URL` overrides the default `http://127.0.0.1:8123`.
 The integration suite proves message retention, thread isolation, disjoint
-parallel reducers, and approval/denial without remote credentials.
+parallel reducers, approval/denial, and mocked BMAD project planning without
+remote model credentials.
 
 ## CI/CD and GHCR
 
