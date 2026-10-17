@@ -22,7 +22,7 @@ def client():
         while time.monotonic() < deadline:
             try:
                 response = session.get("/ok", timeout=2)
-                if response.status_code == 200 and response.json() == {"ok": True}:
+                if response.status_code == 200 and response.json().get("ok") is True:
                     yield session
                     return
                 last_error = f"/ok returned {response.status_code}: {response.text[:200]}"

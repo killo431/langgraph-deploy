@@ -1,0 +1,174 @@
+name: CI/CD Quality Gate & Agent Server Deployment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  UV_VERSION: "0.13.1"
+
+jobs:
+  test-and-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+      - name: Run unit and integration quality gates
+        run: uv run --frozen pytest tests/unit tests/integration
+
+  build-and-smoke-test:
+    needs: test-and-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build standalone image on every change
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: bmad-langgraph-agent:local
+      # Pull-request code must never receive production deployment credentials.
+      - name: Start uncredentialed PR development server
+        if: github.event_name == 'pull_request'
+        run: |
+          touch .env
+          LANGCHAIN_TRACING_V2=false uv run --frozen langgraph dev \
+            --host 127.0.0.1 --port 8123 --no-browser --no-reload \
+            > /tmp/bmad-dev-server.log 2>&1 &
+          echo "$!" > /tmp/bmad-dev-server.pid
+      - name: Start standalone stack on trusted main pushes
+        if: github.event_name == 'push'
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGGRAPH_CLOUD_LICENSE_KEY: ${{ secrets.LANGGRAPH_CLOUD_LICENSE_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import secrets
+          from pathlib import Path
+
+          keys = ("LANGSMITH_API_KEY", "LANGGRAPH_CLOUD_LICENSE_KEY")
+          for key in keys:
+              if not os.environ.get(key):
+                  raise SystemExit(f"Configure the {key} repository secret for standalone smoke tests")
+              if "\n" in os.environ[key] or "\r" in os.environ[key]:
+                  raise SystemExit(f"{key} must be a single-line credential")
+          path = Path(".env")
+          path.touch(mode=0o600)
+          path.write_text(
+              "".join(f"{key}={os.environ[key]}\n" for key in keys)
+              + f"POSTGRES_PASSWORD={secrets.token_hex(32)}\n"
+              + "LANGCHAIN_TRACING_V2=false\nLANGCHAIN_PROJECT=bmad-ci-smoke\n"
+          )
+          PY
+          docker compose up -d --no-build --wait --wait-timeout 180
+      - name: Run server smoke tests
+        env:
+          RUN_DEPLOYMENT_TESTS: "1"
+        run: uv run --frozen pytest tests/deployment
+      - name: Restart API and verify PostgreSQL persistence
+        if: github.event_name == 'push'
+        env:
+          RUN_DEPLOYMENT_TESTS: "1"
+          VERIFY_RESTART: "1"
+        run: |
+          docker compose restart langgraph-api
+          uv run --frozen pytest tests/deployment/test_smoke.py -k persistence_across_restart
+      - name: Show diagnostics on failure
+        if: failure()
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ -f .env ]; then
+            docker compose logs --no-color --tail=150 || true
+          elif [ -f /tmp/bmad-dev-server.log ]; then
+            tail -150 /tmp/bmad-dev-server.log
+          fi
+      - name: Tear down stack
+        if: always()
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ -f .env ]; then
+            docker compose down -v --remove-orphans
+          elif [ -f /tmp/bmad-dev-server.pid ]; then
+            kill "$(cat /tmp/bmad-dev-server.pid)" || true
+          fi
+          rm -f .env
+
+  publish-image:
+    needs: [test-and-gate, build-and-smoke-test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Normalize GHCR image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=${REGISTRY}/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+      - name: Build and push gated image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

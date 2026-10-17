@@ -4,8 +4,9 @@ As an operator, I need durable conversational execution with explicit human
 approval so that critical work cannot run before review.
 
 ## Acceptance criteria
-1. **AC-1**: `GET /ok` returns status 200 and `{"ok": true}`. The deployed
-   `bmad_agent` graph is discoverable through `/assistants/search`.
+1. **AC-1**: `GET /ok` returns status 200 with `"ok": true` (current Agent
+   Server versions also return a `services` object). The deployed `bmad_agent`
+   graph is discoverable through `/assistants/search`.
 2. **AC-2**: `add_messages` preserves prior turns; threads remain isolated.
    PostgreSQL-backed state survives API container restarts.
 3. **AC-3**: Parallel branch outputs append to artifact/message accumulators and

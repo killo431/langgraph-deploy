@@ -1,3 +1,202 @@
+# BMAD LangGraph Agent Server
+
+A Python 3.12 LangGraph Standalone Agent Server scaffold with durable PostgreSQL
+state, Redis streaming, human approval, Docker Compose, and gated GHCR publication.
+The original Copilot Orchestra documentation remains below.
+
+## Repository layout
+
+```text
+.bmad/
+  prds/001_core_agent_prd.md
+  architecture/ADR-001-runtime-topology.md
+  stories/STORY-001-agent-execution.md
+.github/workflows/deploy.yml
+.dockerignore
+.env.example
+.gitignore
+Dockerfile
+docker-compose.yml
+graphs/
+  __init__.py
+  agent.py
+  nodes.py
+  state.py
+langgraph.json
+pyproject.toml
+uv.lock
+tests/
+  unit/test_nodes.py
+  integration/test_graph.py
+  deployment/test_smoke.py
+```
+
+## Start the standalone stack
+
+Prerequisites: Docker Engine with Compose v2, a deployment-enabled LangSmith API
+key, and the appropriate LangGraph standalone production license. Obtain these
+credentials from LangSmith; this repository cannot provision licenses. Production
+must be able to reach the LangChain licensing endpoint. See the
+[standalone deployment guide](https://docs.langchain.com/langsmith/deploy-standalone-server).
+
+Run the following from `/home/runner/work/langgraph-deploy/langgraph-deploy` (or
+your checkout root):
+
+```bash
+cp .env.example .env
+chmod 600 .env
+openssl rand -hex 32
+```
+
+Set `POSTGRES_PASSWORD` in `.env` to the generated value, and fill in
+`LANGSMITH_API_KEY` and `LANGGRAPH_CLOUD_LICENSE_KEY`. Use a URI-safe password
+(the hexadecimal command above is suitable). Never commit `.env`. The OpenAI key
+is optional: the reference executor deliberately returns a deterministic message
+and does not call a model or execute external side effects.
+
+```bash
+docker compose up -d --build --wait --wait-timeout 180
+curl --fail http://127.0.0.1:8123/ok
+curl --fail http://127.0.0.1:8123/assistants/search \
+  -H 'Content-Type: application/json' -d '{"limit":10}'
+```
+
+The API listens on loopback port 8123. PostgreSQL and Redis have no host-published
+ports. Compose constructs `DATABASE_URI` and `REDIS_URI` for the private service
+network; application data lives in the `langgraph-db-data` volume.
+Current Agent Server `/ok` responses include `"ok": true` and a `services` object;
+smoke tests allow this official health metadata.
+`docker compose down` preserves that data; **`docker compose down -v` deletes it**.
+Changing `POSTGRES_PASSWORD` does not rotate an existing PostgreSQL volume's role
+password; rotate it in PostgreSQL and update configuration together.
+
+### Multi-turn conversations and approvals
+
+Create a thread, then submit runs on its returned ID:
+
+```bash
+curl --fail http://127.0.0.1:8123/threads \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Using the returned `thread_id` as `THREAD_ID`:
+
+```bash
+curl --fail "http://127.0.0.1:8123/threads/${THREAD_ID}/runs/wait" \
+  -H 'Content-Type: application/json' \
+  -d '{"assistant_id":"bmad_agent","input":{"messages":[{"role":"user","content":"A critical operation"}]}}'
+curl --fail "http://127.0.0.1:8123/threads/${THREAD_ID}/state"
+curl --fail "http://127.0.0.1:8123/threads/${THREAD_ID}/runs/wait" \
+  -H 'Content-Type: application/json' \
+  -d '{"assistant_id":"bmad_agent","command":{"resume":{"approved":true}}}'
+```
+
+The native Python equivalent is `graph.invoke(Command(resume={"approved": True}),
+config)` using the same thread configuration. Boolean `True` is also accepted;
+other submitted non-null decisions deny execution. Use `{"approved": null}` for
+an empty decision, not `Command(resume=None)` (which is not a resume payload).
+Ordinary input bypasses approval. Each critical turn asks for a fresh decision.
+For SSE streaming, use `/threads/${THREAD_ID}/runs/stream` with the same request
+body plus `"stream_mode":["updates"]` and `curl -N`.
+
+Keyword-based classification is a demonstration, **not authorization**. The API
+is not authenticated by this scaffold. Before enabling remote access, put it
+behind an authenticated TLS gateway with per-thread authorization and a trusted
+reviewer-only approval route; never let an untrusted caller approve its own work.
+Only then change `API_BIND_ADDRESS` if needed. Replace the deterministic executor
+with authorized domain tools and extend tests before real side effects.
+
+## Development and verification
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
+```bash
+uv sync --frozen --extra dev
+uv run --frozen pytest tests/unit tests/integration
+# Credential-free development alternative to Docker (not the production runtime):
+LANGCHAIN_TRACING_V2=false uv run --frozen langgraph dev \
+  --host 127.0.0.1 --port 8123 --no-browser --no-reload
+```
+
+Do not run the development server and Compose on the same port simultaneously.
+With either server running, in another terminal:
+
+```bash
+RUN_DEPLOYMENT_TESTS=1 uv run --frozen pytest tests/deployment
+# With Compose, also validate durability after restarting only the API:
+docker compose restart langgraph-api
+RUN_DEPLOYMENT_TESTS=1 VERIFY_RESTART=1 uv run --frozen pytest \
+  tests/deployment/test_smoke.py -k persistence_across_restart
+```
+
+The first smoke pass seeds a dedicated restart-test thread; the verification pass
+checks and deletes it. Run both passes on a disposable test deployment. Ordinary
+`uv run --frozen pytest` skips deployment tests unless explicitly enabled.
+`AGENT_SERVER_URL` overrides the default `http://127.0.0.1:8123`.
+The integration suite proves message retention, thread isolation, disjoint
+parallel reducers, and approval/denial without remote credentials.
+
+## CI/CD and GHCR
+
+The workflow follows the quality-gate pattern from
+[`langchain-samples/cicd-pipeline-example`](https://github.com/langchain-samples/cicd-pipeline-example):
+
+1. Every PR and main push installs the frozen lockfile and passes unit/integration
+   tests, then builds the standalone Docker image.
+2. PRs run HTTP smoke tests using the official credential-free development server.
+   They never receive deployment secrets, push images, or claim to validate the
+   licensed PostgreSQL runtime.
+3. Main pushes must pass actual Compose smoke tests, native approval/resume, SSE,
+   and PostgreSQL persistence across API restart. Missing credentials fail closed.
+   Set repository Actions secrets `LANGSMITH_API_KEY` and
+   `LANGGRAPH_CLOUD_LICENSE_KEY` before enabling this gate.
+4. Only a successful main push publishes `ghcr.io/killo431/langgraph-deploy:latest`
+   and `:sha-<full-commit-sha>` with SBOM, build provenance, and a GitHub artifact
+   attestation. GHCR names are normalized to lowercase. Publication rebuilds the
+   same pinned base and frozen application dependencies, not an unpinned image.
+
+Enable Actions package writes and branch protection requiring the
+`test-and-gate` and `build-and-smoke-test` checks. Restrict who can push to main
+and manage deployment secrets. Private repositories may need a GitHub plan that
+supports artifact attestations. Pull requests from forks need no secrets.
+Cleanup runs on failures; CI deletes only its disposable database volume.
+
+For a registry-based rollout, authenticate Docker to GHCR if the package is
+private, set `AGENT_IMAGE` to a published immutable tag or digest, then:
+
+```bash
+docker compose pull langgraph-api
+docker compose up -d --no-build --wait --wait-timeout 180
+```
+
+This pipeline publishes an image; it does not silently connect to or modify a
+remote host. Host rollout is an explicit operator action. Roll back by restoring
+the previous image digest, with database migration compatibility verified first.
+
+## Runtime operations and production boundaries
+
+- The Dockerfile follows official `langgraph dockerfile` output, registers
+  `LANGSERVE_GRAPHS`, applies the HTTP/checkpointer configuration, respects
+  `/api/constraints.txt`, and pins its Wolfi server base by digest. `.dockerignore`
+  allowlists application build inputs, excluding `.env`, Git history, and tests.
+  Refresh the base and lockfile together, rebuild, and smoke-test upgrades.
+- Checkpoint TTL is **43,200 minutes (30 days)**, with an hourly sweep and deletion
+  strategy. This deletes expired thread history; adjust it for retention needs.
+- `LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_PROJECT`, and the LangSmith key enable
+  tracing. Review trace privacy, access control, and retention before production.
+  CI disables tracing. Use `LANGSMITH_ENDPOINT` for self-hosted LangSmith.
+- Back up PostgreSQL with tested `pg_dump`/restore or managed PITR. Monitor `/ok`,
+  errors, run queue depth, Redis memory, PostgreSQL storage, and latency.
+- Restart policies avoid scale-to-zero cold starts but cannot provide zero
+  downtime during single-host outages or single-replica upgrades. For HA,
+  provision redundant PostgreSQL/Redis and API workers behind a load balancer.
+  Run load tests to verify the <2.5s autonomous latency target in your environment.
+- Compose is a single-host baseline, not a substitute for an enterprise
+  orchestrator, resource sizing, network isolation, secret management, or
+  disaster recovery. Never expose the unauthenticated API directly to the internet.
+
+---
+
 # GitHub Copilot Orchestra
 
 > **A multi-agent orchestration system for structured, test-driven software development with AI assistance**
