@@ -1,0 +1,74 @@
+volumes:
+  langgraph-db-data:
+    driver: local
+
+services:
+  langgraph-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langgraph-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: langgraph
+      POSTGRES_USER: langgraph
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set a URI-safe POSTGRES_PASSWORD in .env}"
+    volumes:
+      - langgraph-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langgraph -d langgraph"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 10s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  langgraph-api:
+    image: "${AGENT_IMAGE:-bmad-langgraph-agent:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8123:8000"
+    depends_on:
+      langgraph-redis:
+        condition: service_healthy
+      langgraph-postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      REDIS_URI: "redis://langgraph-redis:6379"
+      DATABASE_URI: "postgres://langgraph:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@langgraph-postgres:5432/langgraph?sslmode=disable"
+      LANGSMITH_API_KEY: "${LANGSMITH_API_KEY:?Set a deployment-enabled LANGSMITH_API_KEY in .env}"
+      LANGGRAPH_CLOUD_LICENSE_KEY: "${LANGGRAPH_CLOUD_LICENSE_KEY:-}"
+      LANGCHAIN_TRACING_V2: "${LANGCHAIN_TRACING_V2:-true}"
+      LANGCHAIN_PROJECT: "${LANGCHAIN_PROJECT:-bmad-langgraph-agent}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ok', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"

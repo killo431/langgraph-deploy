@@ -1,0 +1,20 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.12",
+  "dependencies": ["."],
+  "image_distro": "wolfi",
+  "graphs": {
+    "bmad_agent": "./graphs/agent.py:graph"
+  },
+  "env": ".env",
+  "checkpointer": {
+    "ttl": {
+      "strategy": "delete",
+      "sweep_interval_minutes": 60,
+      "default_ttl": 43200
+    }
+  },
+  "http": {
+    "disable_meta": false
+  }
+}
